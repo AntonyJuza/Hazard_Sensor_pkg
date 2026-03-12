@@ -1,0 +1,39 @@
+# config/navigation.yaml
+# Rover Navigation — all tunable parameters in one place
+# Load via launch file or:  ros2 run ... --ros-args --params-file config/navigation.yaml
+
+/**:
+  ros__parameters:
+
+    # ── Ultrasonic sensor GPIO pins (BCM numbering) ──────────────────────────
+    # Front center sensor
+    front_trig: 5
+    front_echo: 6
+    # Front left sensor  (mounted ~30° off center-left)
+    front_left_trig: 16
+    front_left_echo: 26
+    # Front right sensor (mounted ~30° off center-right)
+    front_right_trig: 24
+    front_right_echo: 23
+
+    # Publish rate for ultrasonic readings
+    publish_rate_hz: 10.0
+
+    # ── Navigation thresholds (cm) ───────────────────────────────────────────
+    # Stop and dodge when front sensor reads below this
+    danger_dist_cm: 25.0
+    # Start planning turn when front reads below this
+    caution_dist_cm: 50.0
+
+    # ── Speed settings ───────────────────────────────────────────────────────
+    # Must be within max_linear_speed set in motor pkg (default 0.5 m/s)
+    forward_speed: 0.15      # m/s  normal forward speed
+    turn_speed: 0.6          # rad/s  turning speed
+
+    # ── Physical robot parameter ─────────────────────────────────────────────
+    # MEASURE THIS on your actual rover (distance between left/right wheel centers)
+    # Must match wheel_base in motor pkg yaml  (cytron motor_control.yaml)
+    wheel_base: 0.25        # meters
+
+    # ── Loop rate ────────────────────────────────────────────────────────────
+    loop_rate_hz: 10.0
