@@ -1,38 +1,24 @@
 #!/usr/bin/env python3
 """
-navigation_node.py — v4  (IMU Recovery Scan)
-=============================================
-New feature: RECOVERY_SCAN state replaces the old simple REVERSE state.
+navigation_node.py — v5  (Human Rescue)
+=========================================
+Adds HUMAN_APPROACH state and subscribes to new topics from the PC server:
+  /human_detected    (Bool)    — True when YOLO sees a person
+  /human_direction   (String)  — "left" | "center" | "right"
+  /rescue_status     (String)  — "IDLE"|"SEARCHING"|"APPROACHING"|"COMMUNICATING"|"REPORTED"
 
-When the rover hits a dead end it executes a structured 3-phase maneuver:
+When rescue_status is APPROACHING or COMMUNICATING, the navigation node
+switches to HUMAN_APPROACH and steers toward the human using /human_direction
+(same logic as fire approach but slower/safer).
 
-  Phase 1 — BACKING
-    Reverse straight until dist_front > SCAN_CLEAR_DIST (40cm).
-    Uses actual distance, not a timer — so it backs up exactly as far as needed.
+When rescue_status returns to IDLE, the node goes back to SEARCH.
 
-  Phase 2 — SCAN LEFT then SCAN RIGHT
-    Rotate +90° left  → hold 0.3s → read left sensor  → rotate back to 0°
-    Rotate -90° right → hold 0.3s → read right sensor → rotate back to 0°
-
-    Angle is tracked by integrating angular_velocity.z from the IMU at 100Hz.
-    This is reliable because your IMU publishes at exactly 100Hz.
-    The rover knows the actual angle turned, not a time estimate.
-
-  Phase 3 — DECIDING + COMMITTING
-    Compare recorded left_dist vs right_dist.
-    Turn toward the larger value.
-    Hold the turn until IMU confirms 90° rotation, then resume SEARCH.
-    If both sides < BOTH_BLOCKED_DIST → back up more and rescan.
-
-All v3 features retained:
+All v4 features retained:
+  - Recovery scan (IMU-based 3-phase maneuver)
   - Heading correction (P-controller)
   - Stuck detection
-  - Stop at fire
   - Side wall nudge
-  - Turn hold (for non-recovery turns)
-  - Separate side/front thresholds
-
-IMU runs at 100Hz — angle integration error over 90° turn is < 2°.
+  - Turn hold
 """
 
 import rclpy
@@ -54,13 +40,18 @@ SIDE_WARN_DIST      = 40.0    # cm — gentle nudge away
 # ─── FIRE ────────────────────────────────────────────────────────────────────
 FIRE_STOP_DIST      = 20.0    # cm — stop this close to fire
 
+# ─── HUMAN APPROACH ──────────────────────────────────────────────────────────
+HUMAN_STOP_DIST     = 30.0    # cm — stop this close to human (safer margin)
+HUMAN_FORWARD_SPEED = 0.08    # m/s — cautious approach speed
+HUMAN_TURN_SPEED    = 0.7     # rad/s — slower turn toward human
+
 # ─── SPEED ───────────────────────────────────────────────────────────────────
-SPEED_FORWARD_NORMAL = 0.13   # m/s  (your tuned value)
+SPEED_FORWARD_NORMAL = 0.13   # m/s
 SPEED_FORWARD_SLOW   = 0.07   # m/s  near fire
 SPEED_BACKWARD       = -0.10  # m/s
 TURN_SPEED_NORMAL    = 1.2    # rad/s
 TURN_SPEED_SLOW      = 1.0    # rad/s
-SIDE_AVOID_ANGULAR   = 1.0   # rad/s
+SIDE_AVOID_ANGULAR   = 1.0    # rad/s
 
 # ─── TURN HOLD (prevents jerk) ────────────────────────────────────────────────
 TURN_HOLD_S          = 0.5    # seconds
@@ -71,28 +62,17 @@ HEADING_DEADBAND     = 0.02   # rad/s
 HEADING_MIN_SPEED    = 0.05   # m/s
 
 # ─── IMU STUCK DETECTION ─────────────────────────────────────────────────────
-STUCK_ACCEL_THRESHOLD = 0.08  # m/s² (lowered for 0.13 m/s forward speed)
+STUCK_ACCEL_THRESHOLD = 0.08  # m/s²
 STUCK_TIMEOUT_S       = 2.5   # seconds
 
-# ─── RECOVERY SCAN PARAMETERS ────────────────────────────────────────────────
-# How far to back up before scanning
-SCAN_CLEAR_DIST      = 40.0   # cm — back up until front reads above this
-
-# Failsafe: if backing up takes longer than this, stop and try anyway
+# ─── RECOVERY SCAN ───────────────────────────────────────────────────────────
+SCAN_CLEAR_DIST      = 40.0   # cm
 SCAN_BACKUP_TIMEOUT  = 3.0    # seconds
-
-# How many degrees to scan each side
 SCAN_ANGLE_DEG       = 90.0   # degrees
 SCAN_ANGLE_RAD       = math.radians(SCAN_ANGLE_DEG)
-
-# Speed during scan rotation — slow for accuracy
-SCAN_TURN_SPEED      = 0.9   # rad/s  (slow = less integration error)
-
-# How long to hold still at each scan point to get stable sensor reading
+SCAN_TURN_SPEED      = 0.9    # rad/s
 SCAN_HOLD_S          = 0.4    # seconds
-
-# Angle tolerance — consider target reached within this many degrees
-SCAN_ANGLE_TOL_RAD   = math.radians(8.0)   # ±8° tolerance
+SCAN_ANGLE_TOL_RAD   = math.radians(8.0)
 
 # If both sides read below this after scan → back up more before deciding
 BOTH_BLOCKED_DIST    = 35.0   # cm
@@ -102,23 +82,24 @@ MAX_SCAN_RETRIES     = 2
 
 
 class NavigationState:
-    SEARCH        = "SEARCH"
-    APPROACH      = "APPROACH"
-    RECOVERY_SCAN = "RECOVERY_SCAN"
-    STOPPED       = "STOPPED"
+    SEARCH         = "SEARCH"
+    APPROACH       = "APPROACH"
+    HUMAN_APPROACH = "HUMAN_APPROACH"   # NEW: steer toward detected human
+    RECOVERY_SCAN  = "RECOVERY_SCAN"
+    STOPPED        = "STOPPED"
 
 
 class ScanPhase:
     """Sub-states within RECOVERY_SCAN."""
-    BACKING       = "BACKING"       # reversing to get clearance
-    TO_LEFT       = "TO_LEFT"       # rotating to +90°
-    HOLD_LEFT     = "HOLD_LEFT"     # paused at left, reading sensor
-    RETURN_LEFT   = "RETURN_LEFT"   # rotating back to 0°
-    TO_RIGHT      = "TO_RIGHT"      # rotating to -90°
-    HOLD_RIGHT    = "HOLD_RIGHT"    # paused at right, reading sensor
-    RETURN_RIGHT  = "RETURN_RIGHT"  # rotating back to 0°
-    COMMITTING    = "COMMITTING"    # final turn to chosen direction
-    DONE          = "DONE"          # handoff back to SEARCH
+    BACKING       = "BACKING"
+    TO_LEFT       = "TO_LEFT"
+    HOLD_LEFT     = "HOLD_LEFT"
+    RETURN_LEFT   = "RETURN_LEFT"
+    TO_RIGHT      = "TO_RIGHT"
+    HOLD_RIGHT    = "HOLD_RIGHT"
+    RETURN_RIGHT  = "RETURN_RIGHT"
+    COMMITTING    = "COMMITTING"
+    DONE          = "DONE"
     DECIDING      = "DECIDING"
 
 
@@ -146,6 +127,10 @@ class NavigationNode(Node):
         self.declare_parameter("scan_hold_s",         SCAN_HOLD_S)
         self.declare_parameter("both_blocked_dist_cm",BOTH_BLOCKED_DIST)
         self.declare_parameter("imu_topic",           "/imu/mpu6050")
+        # NEW parameters for human approach
+        self.declare_parameter("human_stop_dist_cm",  HUMAN_STOP_DIST)
+        self.declare_parameter("human_forward_speed", HUMAN_FORWARD_SPEED)
+        self.declare_parameter("human_turn_speed",    HUMAN_TURN_SPEED)
 
         rate                 = self.get_parameter("loop_rate_hz").value
         self.danger_dist     = self.get_parameter("danger_dist_cm").value
@@ -165,12 +150,20 @@ class NavigationNode(Node):
         self.scan_hold_s     = self.get_parameter("scan_hold_s").value
         self.both_blocked    = self.get_parameter("both_blocked_dist_cm").value
         imu_topic            = self.get_parameter("imu_topic").value
+        self.human_stop_dist = self.get_parameter("human_stop_dist_cm").value
+        self.human_fwd_speed = self.get_parameter("human_forward_speed").value
+        self.human_turn_spd  = self.get_parameter("human_turn_speed").value
 
         # ── Navigation state ──────────────────────────────────────────────────
         self.state           = NavigationState.SEARCH
         self.fire_detected   = False
         self.fire_direction  = "center"
         self.emergency_stop  = False
+
+        # ── Human rescue state (NEW) ─────────────────────────────────────────
+        self.human_detected   = False
+        self.human_direction  = "center"
+        self.rescue_status    = "IDLE"
 
         # ── Sensor readings ───────────────────────────────────────────────────
         self.dist_front       = 200.0
@@ -181,7 +174,7 @@ class NavigationNode(Node):
         self.imu_yaw_rate    = 0.0
         self.imu_accel_x     = 0.0
         self.imu_available   = False
-        self._last_imu_time  = None    # for accurate dt calculation
+        self._last_imu_time  = None
 
         # ── Heading correction ────────────────────────────────────────────────
         self._heading_correction = 0.0
@@ -196,14 +189,14 @@ class NavigationNode(Node):
 
         # ── Recovery scan state ───────────────────────────────────────────────
         self._scan_phase          = ScanPhase.BACKING
-        self._scan_angle_accum    = 0.0    # integrated angle (radians)
-        self._scan_phase_start    = 0.0    # time phase began
-        self._scan_backup_start   = 0.0    # time backup began
-        self._scan_left_dist      = 0.0    # recorded left scan reading
-        self._scan_right_dist     = 0.0    # recorded right scan reading
-        self._scan_chosen_dir     = 0.0    # +1 left, -1 right
+        self._scan_angle_accum    = 0.0
+        self._scan_phase_start    = 0.0
+        self._scan_backup_start   = 0.0
+        self._scan_left_dist      = 0.0
+        self._scan_right_dist     = 0.0
+        self._scan_chosen_dir     = 0.0
         self._scan_retry_count    = 0
-        self._scan_commit_accum   = 0.0    # angle integrated during commit turn
+        self._scan_commit_accum   = 0.0
 
         # ── Subscribers ──────────────────────────────────────────────────────
         self.create_subscription(
@@ -218,6 +211,14 @@ class NavigationNode(Node):
         self.create_subscription(
             Bool,   "/emergency_stop", self._estop_cb,          10)
 
+        # NEW: Human rescue topic subscriptions
+        self.create_subscription(
+            Bool,   "/human_detected",  self._human_detected_cb,  10)
+        self.create_subscription(
+            String, "/human_direction", self._human_direction_cb, 10)
+        self.create_subscription(
+            String, "/rescue_status",   self._rescue_status_cb,   10)
+
         # ── Publishers ───────────────────────────────────────────────────────
         self.cmd_vel_pub = self.create_publisher(Twist,  "/cmd_vel",    10)
         self.status_pub  = self.create_publisher(String, "/nav_status", 10)
@@ -225,11 +226,13 @@ class NavigationNode(Node):
         self.timer = self.create_timer(1.0 / rate, self._control_loop)
 
         self.get_logger().info(
-            f"NavigationNode v4 (Recovery Scan) ready\n"
+            f"NavigationNode v5 (Human Rescue) ready\n"
             f"  Scan angle     : {math.degrees(self.scan_angle_rad):.0f}°\n"
             f"  Scan turn speed: {self.scan_turn_spd} rad/s\n"
             f"  Backup until   : {self.scan_clear_dist}cm front clear\n"
-            f"  IMU topic      : {imu_topic} (100Hz ✓)"
+            f"  IMU topic      : {imu_topic} (100Hz ✓)\n"
+            f"  Human stop dist: {self.human_stop_dist}cm\n"
+            f"  Human approach : {self.human_fwd_speed} m/s"
         )
 
     # ─── Sensor callbacks ─────────────────────────────────────────────────────
@@ -241,24 +244,14 @@ class NavigationNode(Node):
             self.dist_front_right = msg.data[2]
 
     def _imu_cb(self, msg: Imu):
-        """
-        100Hz IMU callback.
-        We calculate dt from actual timestamps rather than assuming 10ms
-        because the control loop runs at 10Hz — the IMU data arrives 10x
-        faster and we integrate it here directly for maximum accuracy.
-        """
         now = time.time()
         if self._last_imu_time is not None:
             dt = now - self._last_imu_time
-            # Clamp dt to reasonable range (handles occasional missed messages)
             dt = max(0.001, min(dt, 0.05))
 
-            # Integrate yaw rate → angle accumulation
-            # Used by recovery scan to know actual rotation angle
             if self.state == NavigationState.RECOVERY_SCAN:
                 self._scan_angle_accum += self.imu_yaw_rate * dt
 
-                # Also integrate commit turn separately
                 if self._scan_phase == ScanPhase.COMMITTING:
                     self._scan_commit_accum += self.imu_yaw_rate * dt
 
@@ -271,11 +264,16 @@ class NavigationNode(Node):
         prev = self.fire_detected
         self.fire_detected = msg.data
         if self.fire_detected and not prev:
-            self.get_logger().info("🔥 Fire confirmed — APPROACH mode")
-            self.state = NavigationState.APPROACH
+            # Only go to APPROACH if we're NOT in rescue mode
+            if self.rescue_status == "IDLE":
+                self.get_logger().info("🔥 Fire confirmed — APPROACH mode")
+                self.state = NavigationState.APPROACH
+            else:
+                self.get_logger().info("🔥 Fire confirmed — but RESCUE mode active, staying in rescue")
         elif not self.fire_detected and prev:
             self.get_logger().info("Fire cleared — SEARCH mode")
-            self.state = NavigationState.SEARCH
+            if self.state != NavigationState.HUMAN_APPROACH:
+                self.state = NavigationState.SEARCH
 
     def _fire_direction_cb(self, msg: String):
         self.fire_direction = msg.data.strip().lower()
@@ -289,6 +287,61 @@ class NavigationNode(Node):
         else:
             self.get_logger().info("E-STOP cleared")
             self.state = NavigationState.SEARCH
+
+    # ─── NEW: Human rescue callbacks ──────────────────────────────────────────
+
+    def _human_detected_cb(self, msg: Bool):
+        prev = self.human_detected
+        self.human_detected = msg.data
+        if self.human_detected and not prev:
+            self.get_logger().info("👤 Human detected by vision system")
+        elif not self.human_detected and prev:
+            self.get_logger().info("👤 Human no longer detected")
+
+    def _human_direction_cb(self, msg: String):
+        self.human_direction = msg.data.strip().lower()
+
+    def _rescue_status_cb(self, msg: String):
+        prev = self.rescue_status
+        self.rescue_status = msg.data.strip().upper()
+
+        if prev != self.rescue_status:
+            self.get_logger().info(
+                f"🚑 Rescue status: {prev} → {self.rescue_status}"
+            )
+
+            # Transition navigation state based on rescue status
+            if self.rescue_status in ("APPROACHING",):
+                if self.state != NavigationState.HUMAN_APPROACH:
+                    self.get_logger().info(
+                        "🚑 Switching to HUMAN_APPROACH navigation"
+                    )
+                    self.state = NavigationState.HUMAN_APPROACH
+
+            elif self.rescue_status == "COMMUNICATING":
+                # Stop the robot — PC server is handling communication
+                self.get_logger().info(
+                    "🚑 COMMUNICATING — stopping motors"
+                )
+                self._publish_cmd(0.0, 0.0)
+                self.state = NavigationState.STOPPED
+
+            elif self.rescue_status == "SEARCHING":
+                # PC server is rotating via cmd_vel — we yield control
+                # but don't fight it. Just stay in SEARCH (passive).
+                if self.state == NavigationState.STOPPED:
+                    self.state = NavigationState.SEARCH
+                self.get_logger().info(
+                    "🚑 SEARCHING — yielding to PC rotation commands"
+                )
+
+            elif self.rescue_status == "IDLE":
+                if self.state in (NavigationState.HUMAN_APPROACH,
+                                  NavigationState.STOPPED):
+                    self.state = NavigationState.SEARCH
+                    self.get_logger().info(
+                        "🚑 Rescue ended — resuming SEARCH"
+                    )
 
     # ─── Sensor properties ────────────────────────────────────────────────────
 
@@ -413,28 +466,15 @@ class NavigationNode(Node):
     # ─── Recovery scan state machine ─────────────────────────────────────────
 
     def _recovery_scan_behavior(self):
-        """
-        Full 3-phase recovery scan using IMU angle integration.
-
-        BACKING     → reverse until front clears SCAN_CLEAR_DIST
-        TO_LEFT     → rotate +90° (IMU tracked)
-        HOLD_LEFT   → pause, read sensor
-        RETURN_LEFT → rotate back to 0° (IMU tracked)
-        TO_RIGHT    → rotate -90° (IMU tracked)
-        HOLD_RIGHT  → pause, read sensor
-        RETURN_RIGHT→ rotate back to 0° (IMU tracked)
-        COMMITTING  → turn to chosen direction for full 90° (IMU tracked)
-        DONE        → back to SEARCH
-        """
+        """Full 3-phase recovery scan using IMU angle integration."""
 
         # ── Phase 1: BACKING ─────────────────────────────────────────────────
         if self._scan_phase == ScanPhase.BACKING:
             elapsed = time.time() - self._scan_backup_start
 
-            # Success: front is clear enough to scan
             if self.dist_front >= self.scan_clear_dist:
                 self._publish_cmd(0.0, 0.0)
-                self._scan_angle_accum = 0.0   # reset for rotation tracking
+                self._scan_angle_accum = 0.0
                 self._scan_phase       = ScanPhase.TO_LEFT
                 self._scan_phase_start = time.time()
                 self._publish_status(
@@ -442,7 +482,6 @@ class NavigationNode(Node):
                 )
                 return
 
-            # Failsafe: if backing up too long, scan anyway
             if elapsed > SCAN_BACKUP_TIMEOUT:
                 self.get_logger().warn(
                     "SCAN backup timeout — scanning anyway "
@@ -460,12 +499,11 @@ class NavigationNode(Node):
                 f"(target={self.scan_clear_dist:.0f}cm)"
             )
 
-        # ── Phase 2: TO_LEFT — rotate to +90° ────────────────────────────────
+        # ── Phase 2: TO_LEFT ─────────────────────────────────────────────────
         elif self._scan_phase == ScanPhase.TO_LEFT:
-            angle = self._scan_angle_accum   # positive = CCW = left
+            angle = self._scan_angle_accum
 
             if angle >= (self.scan_angle_rad - SCAN_ANGLE_TOL_RAD):
-                # Reached +90° — stop and hold
                 self._publish_cmd(0.0, 0.0)
                 self._scan_phase       = ScanPhase.HOLD_LEFT
                 self._scan_phase_start = time.time()
@@ -479,20 +517,17 @@ class NavigationNode(Node):
                 f"SCAN → LEFT  {math.degrees(angle):.1f}° / {SCAN_ANGLE_DEG:.0f}°"
             )
 
-        # ── Phase 3: HOLD_LEFT — pause and read ──────────────────────────────
+        # ── Phase 3: HOLD_LEFT ───────────────────────────────────────────────
         elif self._scan_phase == ScanPhase.HOLD_LEFT:
             elapsed = time.time() - self._scan_phase_start
             self._publish_cmd(0.0, 0.0)
 
             if elapsed >= self.scan_hold_s:
-                # Record the best (maximum) of front and left sensors
-                # at this angle — front sensor now points left
                 self._scan_left_dist = self.dist_front
                 self._publish_status(
                     f"SCAN — LEFT reading: {self._scan_left_dist:.0f}cm → returning to center"
                 )
-                # Reset accumulator to track return to 0°
-                self._scan_angle_accum = self.scan_angle_rad  # starts at +90°
+                self._scan_angle_accum = self.scan_angle_rad
                 self._scan_phase       = ScanPhase.RETURN_LEFT
                 self._scan_phase_start = time.time()
             else:
@@ -501,12 +536,11 @@ class NavigationNode(Node):
                     f"front={self.dist_front:.0f}cm"
                 )
 
-        # ── Phase 4: RETURN_LEFT — rotate back to 0° ─────────────────────────
+        # ── Phase 4: RETURN_LEFT ─────────────────────────────────────────────
         elif self._scan_phase == ScanPhase.RETURN_LEFT:
-            angle = self._scan_angle_accum   # counting down from +90° to 0°
+            angle = self._scan_angle_accum
 
             if angle <= SCAN_ANGLE_TOL_RAD:
-                # Back at center
                 self._publish_cmd(0.0, 0.0)
                 self._scan_angle_accum = 0.0
                 self._scan_phase       = ScanPhase.TO_RIGHT
@@ -516,18 +550,16 @@ class NavigationNode(Node):
                 )
                 return
 
-            # Rotate right (negative) to return from left
             self._publish_cmd(0.0, -self.scan_turn_spd)
             self._publish_status(
                 f"SCAN ← returning from LEFT  {math.degrees(angle):.1f}° remaining"
             )
 
-        # ── Phase 5: TO_RIGHT — rotate to -90° ───────────────────────────────
+        # ── Phase 5: TO_RIGHT ────────────────────────────────────────────────
         elif self._scan_phase == ScanPhase.TO_RIGHT:
-            angle = self._scan_angle_accum   # goes negative (CW = right)
+            angle = self._scan_angle_accum
 
             if angle <= -(self.scan_angle_rad - SCAN_ANGLE_TOL_RAD):
-                # Reached -90°
                 self._publish_cmd(0.0, 0.0)
                 self._scan_phase       = ScanPhase.HOLD_RIGHT
                 self._scan_phase_start = time.time()
@@ -541,7 +573,7 @@ class NavigationNode(Node):
                 f"SCAN → RIGHT  {math.degrees(angle):.1f}° / -{SCAN_ANGLE_DEG:.0f}°"
             )
 
-        # ── Phase 6: HOLD_RIGHT — pause and read ─────────────────────────────
+        # ── Phase 6: HOLD_RIGHT ──────────────────────────────────────────────
         elif self._scan_phase == ScanPhase.HOLD_RIGHT:
             elapsed = time.time() - self._scan_phase_start
             self._publish_cmd(0.0, 0.0)
@@ -551,7 +583,7 @@ class NavigationNode(Node):
                 self._publish_status(
                     f"SCAN — RIGHT reading: {self._scan_right_dist:.0f}cm → returning to center"
                 )
-                self._scan_angle_accum = -self.scan_angle_rad  # starts at -90°
+                self._scan_angle_accum = -self.scan_angle_rad
                 self._scan_phase       = ScanPhase.RETURN_RIGHT
                 self._scan_phase_start = time.time()
             else:
@@ -560,12 +592,11 @@ class NavigationNode(Node):
                     f"front={self.dist_front:.0f}cm"
                 )
 
-        # ── Phase 7: RETURN_RIGHT — rotate back to 0° ────────────────────────
+        # ── Phase 7: RETURN_RIGHT ────────────────────────────────────────────
         elif self._scan_phase == ScanPhase.RETURN_RIGHT:
-            angle = self._scan_angle_accum   # counting up from -90° to 0°
+            angle = self._scan_angle_accum
 
             if angle >= -SCAN_ANGLE_TOL_RAD:
-                # Back at center — now decide
                 self._publish_cmd(0.0, 0.0)
                 self._scan_phase = ScanPhase.DECIDING
                 self._publish_status(
@@ -579,7 +610,7 @@ class NavigationNode(Node):
                 f"SCAN → returning from RIGHT  {math.degrees(angle):.1f}° remaining"
             )
 
-        # ── Phase 8: DECIDING — pick best direction ───────────────────────────
+        # ── Phase 8: DECIDING ────────────────────────────────────────────────
         elif self._scan_phase == ScanPhase.DECIDING:
             left  = self._scan_left_dist
             right = self._scan_right_dist
@@ -588,7 +619,6 @@ class NavigationNode(Node):
                 f"🔍 SCAN RESULT — LEFT: {left:.0f}cm  RIGHT: {right:.0f}cm"
             )
 
-            # Both sides very blocked — need to back up more
             if left < self.both_blocked and right < self.both_blocked:
                 self._scan_retry_count += 1
                 if self._scan_retry_count <= MAX_SCAN_RETRIES:
@@ -596,24 +626,21 @@ class NavigationNode(Node):
                         f"SCAN — both sides blocked ({left:.0f}/{right:.0f}cm), "
                         f"backing up more (retry {self._scan_retry_count}/{MAX_SCAN_RETRIES})"
                     )
-                    # Back up more and rescan
                     self._scan_phase        = ScanPhase.BACKING
                     self._scan_backup_start = time.time()
                     self._scan_angle_accum  = 0.0
                     return
                 else:
-                    # Max retries hit — pick whichever side is less bad
                     self.get_logger().warn(
                         "SCAN — max retries hit, picking least-blocked side"
                     )
 
-            # Choose the side with more space
             if left >= right:
-                self._scan_chosen_dir = 1.0   # turn left
+                self._scan_chosen_dir = 1.0
                 chosen_name = "LEFT"
                 chosen_dist = left
             else:
-                self._scan_chosen_dir = -1.0  # turn right
+                self._scan_chosen_dir = -1.0
                 chosen_name = "RIGHT"
                 chosen_dist = right
 
@@ -627,14 +654,12 @@ class NavigationNode(Node):
                 f"SCAN → chose {chosen_name} ({chosen_dist:.0f}cm) — committing 90° turn"
             )
 
-        # ── Phase 9: COMMITTING — turn 90° to chosen direction ───────────────
+        # ── Phase 9: COMMITTING ──────────────────────────────────────────────
         elif self._scan_phase == ScanPhase.COMMITTING:
-            # Track how far we've turned using the separate commit accumulator
             turned = abs(self._scan_commit_accum)
             target = self.scan_angle_rad - SCAN_ANGLE_TOL_RAD
 
             if turned >= target:
-                # 90° turn complete — back to SEARCH
                 self._publish_cmd(0.0, 0.0)
                 self._scan_phase = ScanPhase.DONE
                 self._publish_status(
@@ -647,7 +672,7 @@ class NavigationNode(Node):
                 f"SCAN — committing turn  {math.degrees(turned):.1f}° / {SCAN_ANGLE_DEG:.0f}°"
             )
 
-        # ── Phase DONE — return to SEARCH ────────────────────────────────────
+        # ── Phase DONE ───────────────────────────────────────────────────────
         elif self._scan_phase == ScanPhase.DONE:
             self.state = NavigationState.SEARCH
             self.get_logger().info("✅ Recovery scan complete — SEARCH resumed")
@@ -659,7 +684,7 @@ class NavigationNode(Node):
             self._publish_cmd(0.0, 0.0)
             return
 
-        # Stuck detection — not during recovery scan (it intentionally moves slow)
+        # Stuck detection — not during recovery scan or human approach
         if self.state in (NavigationState.SEARCH, NavigationState.APPROACH):
             if self._check_stuck():
                 self._publish_status(
@@ -674,11 +699,13 @@ class NavigationNode(Node):
             self._search_behavior()
         elif self.state == NavigationState.APPROACH:
             self._approach_behavior()
+        elif self.state == NavigationState.HUMAN_APPROACH:
+            self._human_approach_behavior()
 
     # ─────────────────────────────────────────────────────────────────────────
 
     def _search_behavior(self):
-        # Dead end → recovery scan (replaces old simple REVERSE)
+        # Dead end → recovery scan
         if (self.front_blocked
                 and not self.left_clear_for_turn
                 and not self.right_clear_for_turn):
@@ -756,6 +783,69 @@ class NavigationNode(Node):
             self._publish_cmd(speed, side_ang)
             self._publish_status(
                 f"APPROACH → CENTER  F:{self.dist_front:.0f}cm  spd={speed}"
+            )
+
+    # ─── NEW: Human approach behavior ─────────────────────────────────────────
+
+    def _human_approach_behavior(self):
+        """
+        Steer toward detected human using /human_direction.
+        Uses slower, safer speeds than fire approach.
+        Stops when close (ultrasonic dist < human_stop_dist).
+        """
+        # Safety: if human is no longer detected, slow down and wait
+        if not self.human_detected:
+            self._publish_cmd(0.0, 0.0)
+            self._publish_status(
+                f"🚑 HUMAN_APPROACH — human lost, waiting..."
+            )
+            return
+
+        # Stop when close to human
+        if self.human_direction == "center" and self.dist_front <= self.human_stop_dist:
+            self._publish_cmd(0.0, 0.0)
+            self._publish_status(
+                f"🚑 HUMAN REACHED — {self.dist_front:.0f}cm — stopping"
+            )
+            self.state = NavigationState.STOPPED
+            return
+
+        # Front blocked during human approach → recovery scan
+        if self.front_blocked:
+            if not self.left_clear_for_turn and not self.right_clear_for_turn:
+                self._start_recovery_scan()
+                return
+            turn_dir = self._choose_turn_direction()
+            self._publish_cmd(0.0, turn_dir * self.turn_speed)
+            self._publish_status(
+                f"🚑 HUMAN_APPROACH — obstacle, dodge "
+                f"{'LEFT' if turn_dir > 0 else 'RIGHT'}"
+            )
+            return
+
+        # Steer toward human (same logic as fire approach but slower)
+        if self.human_direction == "left":
+            self._publish_cmd(self.human_fwd_speed, self.human_turn_spd)
+            self._publish_status(
+                f"🚑 HUMAN_APPROACH → LEFT  F:{self.dist_front:.0f}cm"
+            )
+        elif self.human_direction == "right":
+            self._publish_cmd(self.human_fwd_speed, -self.human_turn_spd)
+            self._publish_status(
+                f"🚑 HUMAN_APPROACH → RIGHT  F:{self.dist_front:.0f}cm"
+            )
+        else:
+            # Center — go straight toward human
+            speed = self.human_fwd_speed
+            side_ang = 0.0
+            if self.left_wall_close and not self.right_wall_close:
+                side_ang = -SIDE_AVOID_ANGULAR
+            elif self.right_wall_close and not self.left_wall_close:
+                side_ang = SIDE_AVOID_ANGULAR
+            self._publish_cmd(speed, side_ang)
+            self._publish_status(
+                f"🚑 HUMAN_APPROACH → CENTER  F:{self.dist_front:.0f}cm  "
+                f"spd={speed}"
             )
 
     # ─────────────────────────────────────────────────────────────────────────

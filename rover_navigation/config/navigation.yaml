@@ -21,6 +21,11 @@
     # ── Fire ──────────────────────────────────────────────────────────────────
     fire_stop_dist_cm: 20.0
 
+    # ── Human Approach (NEW) ──────────────────────────────────────────────────
+    human_stop_dist_cm: 30.0     # Stop 30cm from human (safer than fire)
+    human_forward_speed: 0.08    # m/s — cautious approach
+    human_turn_speed: 0.7        # rad/s — slower turn toward human
+
     # ── Speed ─────────────────────────────────────────────────────────────────
     forward_speed: 0.13
     turn_speed: 1.0
@@ -36,25 +41,10 @@
     stuck_timeout_s: 2.5
 
     # ── Recovery Scan ─────────────────────────────────────────────────────────
-
-    # Back up until front sensor reads above this before scanning
-    # If your space is tight reduce to 30.0
     scan_clear_dist_cm: 40.0
-
-    # How many degrees to scan each side
-    # 90° gives the clearest left vs right comparison
     scan_angle_deg: 90.0
-
-    # Rotation speed during scan — slower = more accurate angle integration
-    # At 0.35 rad/s a 90° turn takes ~4.5 seconds — acceptable for a prototype
-    # If too slow increase to 0.45, if angle overshoots reduce to 0.25
     scan_turn_speed: 0.9
-
-    # How long to hold still at each scan point before reading the sensor
-    # HC-SR04 needs ~100ms to settle — 0.4s gives 4 readings to average
     scan_hold_s: 0.4
-
-    # If both sides read below this after scanning → back up more and retry
     both_blocked_dist_cm: 35.0
 
     # ── Loop rate ─────────────────────────────────────────────────────────────
