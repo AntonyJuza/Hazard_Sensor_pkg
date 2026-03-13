@@ -1,39 +1,61 @@
-# config/navigation.yaml
-# Rover Navigation — all tunable parameters in one place
-# Load via launch file or:  ros2 run ... --ros-args --params-file config/navigation.yaml
-
 /**:
   ros__parameters:
 
-    # ── Ultrasonic sensor GPIO pins (BCM numbering) ──────────────────────────
-    # Front center sensor
+    # ── Ultrasonic GPIO ───────────────────────────────────────────────────────
     front_trig: 5
     front_echo: 6
-    # Front left sensor  (mounted ~30° off center-left)
     front_left_trig: 16
     front_left_echo: 26
-    # Front right sensor (mounted ~30° off center-right)
     front_right_trig: 24
     front_right_echo: 23
-
-    # Publish rate for ultrasonic readings
     publish_rate_hz: 10.0
 
-    # ── Navigation thresholds (cm) ───────────────────────────────────────────
-    # Stop and dodge when front sensor reads below this
+    # ── Front thresholds ──────────────────────────────────────────────────────
     danger_dist_cm: 25.0
-    # Start planning turn when front reads below this
     caution_dist_cm: 50.0
 
-    # ── Speed settings ───────────────────────────────────────────────────────
-    # Must be within max_linear_speed set in motor pkg (default 0.5 m/s)
-    forward_speed: 0.15      # m/s  normal forward speed
-    turn_speed: 0.6          # rad/s  turning speed
+    # ── Side thresholds ───────────────────────────────────────────────────────
+    side_clear_dist_cm: 80.0
+    side_warn_dist_cm: 40.0
 
-    # ── Physical robot parameter ─────────────────────────────────────────────
-    # MEASURE THIS on your actual rover (distance between left/right wheel centers)
-    # Must match wheel_base in motor pkg yaml  (cytron motor_control.yaml)
-    wheel_base: 0.25        # meters
+    # ── Fire ──────────────────────────────────────────────────────────────────
+    fire_stop_dist_cm: 20.0
 
-    # ── Loop rate ────────────────────────────────────────────────────────────
+    # ── Speed ─────────────────────────────────────────────────────────────────
+    forward_speed: 0.13
+    turn_speed: 1.0
+    wheel_base: 0.235
+
+    # ── Turn hold ─────────────────────────────────────────────────────────────
+    turn_hold_s: 0.5
+
+    # ── IMU ───────────────────────────────────────────────────────────────────
+    imu_topic: "/imu/mpu6050"
+    heading_kp: 0.10
+    heading_deadband: 0.02
+    stuck_timeout_s: 2.5
+
+    # ── Recovery Scan ─────────────────────────────────────────────────────────
+
+    # Back up until front sensor reads above this before scanning
+    # If your space is tight reduce to 30.0
+    scan_clear_dist_cm: 40.0
+
+    # How many degrees to scan each side
+    # 90° gives the clearest left vs right comparison
+    scan_angle_deg: 90.0
+
+    # Rotation speed during scan — slower = more accurate angle integration
+    # At 0.35 rad/s a 90° turn takes ~4.5 seconds — acceptable for a prototype
+    # If too slow increase to 0.45, if angle overshoots reduce to 0.25
+    scan_turn_speed: 0.9
+
+    # How long to hold still at each scan point before reading the sensor
+    # HC-SR04 needs ~100ms to settle — 0.4s gives 4 readings to average
+    scan_hold_s: 0.4
+
+    # If both sides read below this after scanning → back up more and retry
+    both_blocked_dist_cm: 35.0
+
+    # ── Loop rate ─────────────────────────────────────────────────────────────
     loop_rate_hz: 10.0
