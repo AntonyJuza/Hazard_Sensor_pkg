@@ -1,0 +1,590 @@
+<?xml version="1.0"?>
+<!--
+  HazardBot URDF — v2  (built from physical measurements)
+  =========================================================
+  Measurements confirmed from photos + user input:
+
+  Chassis (aluminum extrusion box) : 0.18 × 0.16 × 0.05 m
+  Top plate (black acrylic)        : 0.18 × 0.16 × 0.005 m
+  Wheels                           : diameter 0.10m, width 0.03m
+  Wheelbase (L-R axle to axle)     : 0.25m
+  Wheel axle height from ground    : 0.05m  (chassis sits on ground, axle at center)
+  White sensor post height         : 0.032m
+  Sensor mount height above plate  : 0.03m
+  Side ultrasonic angle            : 47.5° (midpoint of 45–50° range)
+  Camera                           : front-center, ~0.035m above top plate
+
+  Frame layout (X=forward, Y=left, Z=up):
+    base_link          — chassis center at ground level
+    chassis            — aluminum box body
+    top_plate          — black acrylic plate on chassis
+    sensor_post        — white 3D printed center pillar
+    rpi_board          — Raspberry Pi 4B on top of post
+    wheel_*            — 4 wheels (front/rear × left/right)
+    ultrasonic_front   — center HC-SR04, front face of top plate
+    ultrasonic_fl      — front-left HC-SR04, angled 47.5° left
+    ultrasonic_fr      — front-right HC-SR04, angled 47.5° right
+    camera             — PiCamera v2, front-center
+    imu                — MPU6050, mounted under RPi board
+    dht22              — DHT22 temp/humidity sensor
+    mq2                — MQ2 gas sensor
+    flame_sensor       — flame sensor
+
+  Coordinate conventions:
+    All joints use xyz/rpy in meters/radians.
+    Wheel rotation axis = Y (standard for differential drive).
+    Ultrasonic facing direction = +X after yaw rotation applied.
+-->
+
+<robot name="hazardbot">
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       MATERIALS
+  ═══════════════════════════════════════════════════════════════ -->
+  <material name="aluminum_silver">
+    <color rgba="0.75 0.75 0.75 1.0"/>
+  </material>
+  <material name="black_acrylic">
+    <color rgba="0.1 0.1 0.1 1.0"/>
+  </material>
+  <material name="white_pla">
+    <color rgba="0.95 0.95 0.95 1.0"/>
+  </material>
+  <material name="dark_rubber">
+    <color rgba="0.15 0.15 0.15 1.0"/>
+  </material>
+  <material name="green_pcb">
+    <color rgba="0.1 0.4 0.1 1.0"/>
+  </material>
+  <material name="blue_pcb">
+    <color rgba="0.1 0.2 0.7 1.0"/>
+  </material>
+  <material name="sensor_gray">
+    <color rgba="0.5 0.5 0.55 1.0"/>
+  </material>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       BASE LINK  (reference frame — ground level, chassis center)
+  ═══════════════════════════════════════════════════════════════ -->
+  <link name="base_link">
+    <visual>
+      <geometry><box size="0.001 0.001 0.001"/></geometry>
+    </visual>
+  </link>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       CHASSIS — aluminum extrusion box 18×16×5cm
+       Center at: x=0, y=0, z=0.025 (half of 5cm height)
+       Wheels axle at z=0.05 so chassis bottom sits at ground = z=0.025
+  ═══════════════════════════════════════════════════════════════ -->
+  <link name="chassis">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.18 0.16 0.05"/>
+      </geometry>
+      <material name="aluminum_silver"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.18 0.16 0.05"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="1.2"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.003" ixy="0" ixz="0"
+               iyy="0.004" iyz="0"
+               izz="0.006"/>
+    </inertial>
+  </link>
+
+  <joint name="base_to_chassis" type="fixed">
+    <!-- chassis center is 2.5cm above ground -->
+    <origin xyz="0 0 0.025" rpy="0 0 0"/>
+    <parent link="base_link"/>
+    <child link="chassis"/>
+  </joint>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       TOP PLATE — black acrylic 18×16×0.5cm
+       Sits on top of chassis: z = 0.05/2 + 0.005/2 = 0.0275 above chassis center
+  ═══════════════════════════════════════════════════════════════ -->
+  <link name="top_plate">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.18 0.16 0.005"/>
+      </geometry>
+      <material name="black_acrylic"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.18 0.16 0.005"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.0003" ixy="0" ixz="0"
+               iyy="0.0004" iyz="0"
+               izz="0.0006"/>
+    </inertial>
+  </link>
+
+  <joint name="chassis_to_top_plate" type="fixed">
+    <origin xyz="0 0 0.0275" rpy="0 0 0"/>
+    <parent link="chassis"/>
+    <child link="top_plate"/>
+  </joint>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       WHITE SENSOR POST — 3D printed pillar, center of top plate
+       Height: 3.2cm diameter ~3cm (cylindrical post)
+       Positioned center of plate, slightly forward of center
+  ═══════════════════════════════════════════════════════════════ -->
+  <link name="sensor_post">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.015" length="0.032"/>
+      </geometry>
+      <material name="white_pla"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.015" length="0.032"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.05"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.00001" ixy="0" ixz="0"
+               iyy="0.00001" iyz="0"
+               izz="0.00001"/>
+    </inertial>
+  </link>
+
+  <joint name="top_plate_to_sensor_post" type="fixed">
+    <!-- Post sits in center of top plate, half of post height above plate top -->
+    <origin xyz="0.01 0 0.016" rpy="0 0 0"/>
+    <parent link="top_plate"/>
+    <child link="sensor_post"/>
+  </joint>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       RASPBERRY PI 4B — on top of sensor post / white mount
+       Approximate PCB size: 85×56×1.5mm
+  ═══════════════════════════════════════════════════════════════ -->
+  <link name="rpi_board">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.085 0.056 0.015"/>
+      </geometry>
+      <material name="green_pcb"/>
+    </visual>
+    <inertial>
+      <mass value="0.046"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.00001" ixy="0" ixz="0"
+               iyy="0.00001" iyz="0"
+               izz="0.00002"/>
+    </inertial>
+  </link>
+
+  <joint name="post_to_rpi" type="fixed">
+    <!-- RPi sits on top of post, centered slightly rearward -->
+    <origin xyz="-0.01 0 0.024" rpy="0 0 0"/>
+    <parent link="sensor_post"/>
+    <child link="rpi_board"/>
+  </joint>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       WHEELS — 4 wheels, diameter 10cm, width 3cm
+       Wheelbase (L to R) = 25cm → y offset = ±0.125
+       Wheel track (F to R) — from images roughly 12cm apart → x = ±0.06
+       Wheel axle at z = 0.05 from ground = 0.025 below chassis center
+       So wheel joint z relative to chassis = -0.025
+  ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- FRONT LEFT WHEEL -->
+  <link name="wheel_front_left">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.03"/>
+      </geometry>
+      <material name="dark_rubber"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.03"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.15"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.0002" ixy="0" ixz="0"
+               iyy="0.0002" iyz="0"
+               izz="0.0004"/>
+    </inertial>
+  </link>
+
+  <joint name="chassis_to_wheel_front_left" type="continuous">
+    <origin xyz="0.06 0.125 0.0" rpy="0 0 0"/>
+    <parent link="chassis"/>
+    <child link="wheel_front_left"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- FRONT RIGHT WHEEL -->
+  <link name="wheel_front_right">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.03"/>
+      </geometry>
+      <material name="dark_rubber"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.03"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.15"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.0002" ixy="0" ixz="0"
+               iyy="0.0002" iyz="0"
+               izz="0.0004"/>
+    </inertial>
+  </link>
+
+  <joint name="chassis_to_wheel_front_right" type="continuous">
+    <origin xyz="0.06 -0.125 0.0" rpy="0 0 0"/>
+    <parent link="chassis"/>
+    <child link="wheel_front_right"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- REAR LEFT WHEEL -->
+  <link name="wheel_rear_left">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.03"/>
+      </geometry>
+      <material name="dark_rubber"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.03"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.15"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.0002" ixy="0" ixz="0"
+               iyy="0.0002" iyz="0"
+               izz="0.0004"/>
+    </inertial>
+  </link>
+
+  <joint name="chassis_to_wheel_rear_left" type="continuous">
+    <origin xyz="-0.06 0.125 0.0" rpy="0 0 0"/>
+    <parent link="chassis"/>
+    <child link="wheel_rear_left"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- REAR RIGHT WHEEL -->
+  <link name="wheel_rear_right">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.03"/>
+      </geometry>
+      <material name="dark_rubber"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.03"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.15"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.0002" ixy="0" ixz="0"
+               iyy="0.0002" iyz="0"
+               izz="0.0004"/>
+    </inertial>
+  </link>
+
+  <joint name="chassis_to_wheel_rear_right" type="continuous">
+    <origin xyz="-0.06 -0.125 0.0" rpy="0 0 0"/>
+    <parent link="chassis"/>
+    <child link="wheel_rear_right"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       ULTRASONIC SENSORS — HC-SR04
+       PCB size approx: 45×20×15mm
+       Mounted 3cm above top plate surface
+
+       Sensor frame: +X = facing direction (beam axis)
+       center  : faces straight forward (yaw=0)
+       FL      : faces forward-left  (yaw=+47.5°)
+       FR      : faces forward-right (yaw=-47.5°)
+
+       Height above ground:
+         chassis bottom = 0
+         chassis top    = 0.05
+         top plate top  = 0.055
+         sensor face    = 0.055 + 0.03 = 0.085m
+
+       X position: at front edge of top plate = +0.09m from chassis center
+       Y position:
+         center : y=0
+         FL     : y=+0.05 (left of center)
+         FR     : y=-0.05 (right of center)
+  ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- CENTER ULTRASONIC -->
+  <link name="ultrasonic_front">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.015 0.045 0.020"/>
+      </geometry>
+      <material name="blue_pcb"/>
+    </visual>
+    <inertial>
+      <mass value="0.01"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0"
+               iyy="0.000001" iyz="0"
+               izz="0.000001"/>
+    </inertial>
+  </link>
+
+  <joint name="top_plate_to_ultrasonic_front" type="fixed">
+    <!--
+      x = front edge of plate = +0.09 (plate is 0.18m long, half=0.09)
+      z = 3cm above top plate surface = 0.0275 (half plate) + 0.03 + 0.01 (half sensor)
+      yaw = 0 (faces straight forward)
+    -->
+    <origin xyz="0.09 0 0.0375" rpy="0 0 0"/>
+    <parent link="top_plate"/>
+    <child link="ultrasonic_front"/>
+  </joint>
+
+  <!-- FRONT LEFT ULTRASONIC -->
+  <link name="ultrasonic_front_left">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.015 0.045 0.020"/>
+      </geometry>
+      <material name="blue_pcb"/>
+    </visual>
+    <inertial>
+      <mass value="0.01"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0"
+               iyy="0.000001" iyz="0"
+               izz="0.000001"/>
+    </inertial>
+  </link>
+
+  <joint name="top_plate_to_ultrasonic_fl" type="fixed">
+    <!--
+      Positioned at front-left corner area
+      yaw = +0.8290 rad = +47.5° (faces forward-left)
+    -->
+    <origin xyz="0.07 0.055 0.0375" rpy="0 0 0.8290"/>
+    <parent link="top_plate"/>
+    <child link="ultrasonic_front_left"/>
+  </joint>
+
+  <!-- FRONT RIGHT ULTRASONIC -->
+  <link name="ultrasonic_front_right">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.015 0.045 0.020"/>
+      </geometry>
+      <material name="blue_pcb"/>
+    </visual>
+    <inertial>
+      <mass value="0.01"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0"
+               iyy="0.000001" iyz="0"
+               izz="0.000001"/>
+    </inertial>
+  </link>
+
+  <joint name="top_plate_to_ultrasonic_fr" type="fixed">
+    <!--
+      Positioned at front-right corner area
+      yaw = -0.8290 rad = -47.5° (faces forward-right)
+    -->
+    <origin xyz="0.07 -0.055 0.0375" rpy="0 0 -0.8290"/>
+    <parent link="top_plate"/>
+    <child link="ultrasonic_front_right"/>
+  </joint>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       CAMERA — PiCamera v2
+       Mounted front-center on sensor post assembly
+       Height: ~3.5cm above top plate
+       Small PCB: 25×24mm
+  ═══════════════════════════════════════════════════════════════ -->
+  <link name="camera">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.010 0.025 0.024"/>
+      </geometry>
+      <material name="green_pcb"/>
+    </visual>
+    <inertial>
+      <mass value="0.003"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.0000001" ixy="0" ixz="0"
+               iyy="0.0000001" iyz="0"
+               izz="0.0000001"/>
+    </inertial>
+  </link>
+
+  <joint name="top_plate_to_camera" type="fixed">
+    <!--
+      Front center of top plate, 3.5cm above plate surface
+      Faces forward (+X direction), no rotation needed
+    -->
+    <origin xyz="0.085 0 0.0575" rpy="0 0 0"/>
+    <parent link="top_plate"/>
+    <child link="camera"/>
+  </joint>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       IMU — MPU6050
+       Mounted under RPi board on the white mount
+       Small PCB: ~20×15mm
+  ═══════════════════════════════════════════════════════════════ -->
+  <link name="imu_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.020 0.015 0.003"/>
+      </geometry>
+      <material name="blue_pcb"/>
+    </visual>
+    <inertial>
+      <mass value="0.003"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.0000001" ixy="0" ixz="0"
+               iyy="0.0000001" iyz="0"
+               izz="0.0000001"/>
+    </inertial>
+  </link>
+
+  <joint name="top_plate_to_imu" type="fixed">
+    <!-- IMU near center of top plate, slightly elevated -->
+    <origin xyz="0.01 0.02 0.015" rpy="0 0 0"/>
+    <parent link="top_plate"/>
+    <child link="imu_link"/>
+  </joint>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       DHT22 — Temperature/Humidity sensor
+       From images: visible on rear-left area of top plate
+  ═══════════════════════════════════════════════════════════════ -->
+  <link name="dht22">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.015 0.012 0.005"/>
+      </geometry>
+      <material name="sensor_gray"/>
+    </visual>
+    <inertial>
+      <mass value="0.003"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.0000001" ixy="0" ixz="0"
+               iyy="0.0000001" iyz="0"
+               izz="0.0000001"/>
+    </inertial>
+  </link>
+
+  <joint name="top_plate_to_dht22" type="fixed">
+    <origin xyz="-0.06 0.06 0.008" rpy="0 0 0"/>
+    <parent link="top_plate"/>
+    <child link="dht22"/>
+  </joint>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       MQ2 — Gas sensor
+       From images: visible on rear area
+  ═══════════════════════════════════════════════════════════════ -->
+  <link name="mq2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.008" length="0.010"/>
+      </geometry>
+      <material name="sensor_gray"/>
+    </visual>
+    <inertial>
+      <mass value="0.005"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.0000001" ixy="0" ixz="0"
+               iyy="0.0000001" iyz="0"
+               izz="0.0000001"/>
+    </inertial>
+  </link>
+
+  <joint name="top_plate_to_mq2" type="fixed">
+    <origin xyz="-0.05 -0.05 0.012" rpy="0 0 0"/>
+    <parent link="top_plate"/>
+    <child link="mq2"/>
+  </joint>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       FLAME SENSOR
+       Small IR sensor board, front area
+  ═══════════════════════════════════════════════════════════════ -->
+  <link name="flame_sensor">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.010 0.030 0.010"/>
+      </geometry>
+      <material name="blue_pcb"/>
+    </visual>
+    <inertial>
+      <mass value="0.003"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.0000001" ixy="0" ixz="0"
+               iyy="0.0000001" iyz="0"
+               izz="0.0000001"/>
+    </inertial>
+  </link>
+
+  <joint name="top_plate_to_flame_sensor" type="fixed">
+    <!-- Front-center, below center ultrasonic -->
+    <origin xyz="0.11 0 0.0" rpy="0 1.5708 0"/>
+    <parent link="top_plate"/>
+    <child link="flame_sensor"/>
+  </joint>
+
+</robot>

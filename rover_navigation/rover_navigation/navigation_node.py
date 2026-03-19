@@ -211,10 +211,10 @@ class NavigationNode(Node):
             self._ultrasonic_cb, 10)
         self.create_subscription(
             Imu,    imu_topic,         self._imu_cb,            10)
-        self.create_subscription(
-            Bool,   "/fire_detected",  self._fire_detected_cb,  10)
-        self.create_subscription(
-            String, "/fire_direction", self._fire_direction_cb, 10)
+        # self.create_subscription(
+        #     Bool,   "/fire_detected",  self._fire_detected_cb,  10)
+        # self.create_subscription(
+        #     String, "/fire_direction", self._fire_direction_cb, 10)
         self.create_subscription(
             Bool,   "/emergency_stop", self._estop_cb,          10)
 
